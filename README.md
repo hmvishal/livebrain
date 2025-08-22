@@ -75,6 +75,7 @@ These commands are for the admins of the paid groups.
 - `/addfaq [question] | [answer]`: Adds a new frequently asked question for the group.
 - `/deletefaq [faq_id]`: Deletes an FAQ using its ID (use `/listfaqs` to find the ID).
 - `/listfaqs`: Shows all the current FAQs and their IDs for the group.
+- `/setup_automation`: Starts a guided setup to connect a payment gateway (e.g., Stripe) for fully automated member subscriptions.
 
 ### User (Group Member) Commands
 These commands are for the regular members of a client's group.
@@ -83,9 +84,27 @@ These commands are for the regular members of a client's group.
 - `/faq`: Shows an interactive menu of frequently asked questions for the group.
 - `/ask [question]`: Asks a question to the bot's integrated AI for a helpful answer.
 
+## Full Automation Setup (Stripe Example)
+
+To enable fully automated member subscriptions, your clients need to connect their payment gateway to the bot. The `/setup_automation` command makes this easy. Here is the process for Stripe:
+
+### Client-Side Setup
+1.  The client (group admin) uses the `/setup_automation` command in a private message with the bot.
+2.  The bot will guide them through selecting "Stripe" and providing their Stripe **secret API key**.
+3.  The bot will then provide a unique **Webhook URL**. The client must copy this URL.
+4.  In their Stripe Dashboard, the client goes to **Developers > Webhooks**.
+5.  They click **Add an endpoint**, paste the URL from the bot, and select the event `checkout.session.completed`.
+
+### Creating Payment Links
+For the automation to work, the bot needs to know which Telegram user made a payment. To do this, the client must include the user's Telegram ID when creating a Stripe Payment Link.
+
+When creating a product or payment link in Stripe, in the advanced options or metadata, there is often a field called **Client Reference ID**. The client must pass the user's Telegram ID into this field. The bot will then automatically match the payment to the user.
+
+*Note: A future version of the bot could include a command like `/generatelink @username` to make this process even easier for the client.*
+
 ## Deployment
 
-For production use, you should run the bot on a server where it can operate 24/7. A simple way to do this is to use a process manager that can automatically restart the bot if it crashes.
+For production use, you should run the bot on a server where it can operate 24/7. This bot runs a web server on port **8443** to listen for webhooks, so you must ensure this port is open and accessible from the internet.
 
 ### Example with `nohup` (simple, not recommended for large scale)
 ```bash

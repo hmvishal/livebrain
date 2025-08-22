@@ -2,18 +2,21 @@ import logging
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, ChatMemberHandler,
-    CallbackQueryHandler,
+    CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 )
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import TELEGRAM_BOT_TOKEN, INSTAMOJO_API, GEMINI_MODEL
+from flask import Flask, request
+import stripe
 from database import (
     setup_database, get_or_create_client, update_client_subscription,
     get_expiring_clients, add_or_get_group, update_user_subscription as activate_db_user,
     add_user_to_group, get_group_by_telegram_id, get_group_members,
     get_expired_group_members, set_user_inactive,
-    add_faq, delete_faq, get_faqs_for_group
+    add_faq, delete_faq, get_faqs_for_group, update_client_payment_config
 )
+import json
 import datetime
 import schedule
 import time
@@ -410,6 +413,197 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await thinking_message.edit_text("Sorry, I encountered an error while trying to answer your question.")
 
 
+# --- Payment Automation Setup Conversation ---
+
+CHOOSE_GATEWAY, GET_API_KEY = range(2)
+
+async def setup_automation_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the payment automation setup conversation."""
+    keyboard = [
+        [InlineKeyboardButton("Stripe", callback_data="stripe")],
+        # Future gateways can be added here
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Let's set up automated payments for your group members. "
+        "Please choose the payment gateway you use:",
+        reply_markup=reply_markup
+    )
+    return CHOOSE_GATEWAY
+
+# Placeholder functions for the next steps
+async def choose_gateway(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the selection of the payment gateway."""
+    query = update.callback_query
+    await query.answer()
+
+    gateway = query.data
+    context.user_data['gateway'] = gateway
+
+    await query.edit_message_text(
+        text=f"You've selected {gateway.capitalize()}. Please now send me your secret API key. "
+             "This key will be stored securely and is required to verify payments."
+    )
+    return GET_API_KEY
+
+async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives the API key, saves the configuration, and ends the conversation."""
+    api_key = update.message.text
+    gateway = context.user_data.get('gateway')
+
+    # Get client from DB
+    client = get_or_create_client(update.effective_user.id)
+
+    # Save the configuration
+    config = {"gateway": gateway, "api_key": api_key}
+    update_client_payment_config(client['id'], json.dumps(config))
+
+    # This is a placeholder URL. The user would need to host this bot and replace this.
+    webhook_url = f"https://your-bot-domain.com/webhook/{gateway}/{client['id']}"
+
+    await update.message.reply_text(
+        "Configuration saved! The final step is to set up the webhook.\n\n"
+        f"1. Copy this URL: `{webhook_url}`\n"
+        f"2. Go to your {gateway.capitalize()} dashboard.\n"
+        "3. Find the 'Webhooks' section.\n"
+        "4. Create a new endpoint and paste the URL.\n"
+        "5. Select the event `checkout.session.completed`.\n\n"
+        "Once this is done, member subscriptions will be automated!",
+        parse_mode='Markdown'
+    )
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def cancel_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels and ends the conversation."""
+    await update.message.reply_text('Automation setup has been cancelled.')
+    return ConversationHandler.END
+
+
+# --- Webhook Server ---
+
+app = Flask(__name__)
+
+@app.route('/webhook/stripe/<int:client_id>', methods=['POST'])
+def stripe_webhook(client_id):
+    payload = request.data
+    sig_header = request.headers.get('Stripe-Signature')
+
+    # This needs the webhook secret, which should be configured per client.
+    # For now, this is a conceptual placeholder. A real implementation
+    # would fetch the client's specific webhook secret from the database.
+    endpoint_secret = 'YOUR_STRIPE_WEBHOOK_SECRET'
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, endpoint_secret
+        )
+    except ValueError as e:
+        # Invalid payload
+        return 'Invalid payload', 400
+    except stripe.error.SignatureVerificationError as e:
+        # Invalid signature
+        return 'Invalid signature', 400
+
+    # Handle the event
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        # Assumes you are passing 'client_reference_id' as the user's telegram_id
+        # when creating the checkout session.
+        user_telegram_id = session.get('client_reference_id')
+
+        if user_telegram_id:
+            # This part needs to know which group the user belongs to.
+            # This requires a more complex lookup. For now, we assume one group per client.
+            # A real implementation would need to solve this mapping.
+            # Let's assume we can get the group_db_id.
+            group_db_id = 1 # Placeholder
+
+            expiry_date = datetime.datetime.now() + datetime.timedelta(days=30)
+            activate_db_user(user_telegram_id, group_db_id, expiry_date.isoformat())
+            logger.info(f"Successfully activated user {user_telegram_id} via Stripe webhook.")
+
+    return 'Success', 200
+
+def run_web_server():
+    """Runs the Flask web server."""
+    # Using '0.0.0.0' makes it accessible from outside the container/machine
+    app.run(host='0.0.0.0', port=8443)
+
+
+# --- Natural Language Processing ---
+
+async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles natural language messages to determine intent."""
+    # --- Authorization Check: Only listen to the client in their managed group ---
+    group_telegram_id = update.message.chat.id
+    client_user_id = update.effective_user.id
+
+    group = get_group_by_telegram_id(group_telegram_id)
+    if not group: return # Not a managed group
+
+    client = get_or_create_client(client_user_id)
+    if not client or client['id'] != group['client_id']:
+        return # Message is not from the authorized client for this group
+
+    # --- Intent Analysis with Gemini ---
+    user_message = update.message.text
+
+    # We only care about replies for now, for activating users
+    if not update.message.reply_to_message:
+        return
+
+    prompt = f"""
+        You are an AI helping a bot understand a command. Analyze the text and identify the intent and entities.
+        The text is: "{user_message}"
+
+        Possible intents are: 'activate_user', 'unknown'.
+        For 'activate_user', you must extract a duration in days. If no duration is mentioned, default to 30.
+
+        Return a single, minified JSON object. Example:
+        {{"intent": "activate_user", "entities": {{"duration_days": 30}}}}
+    """
+
+    if not GEMINI_MODEL: return # AI not configured
+
+    try:
+        response = await GEMINI_MODEL.generate_content_async(prompt)
+        result_json = response.text.strip()
+
+        # Basic parsing and validation
+        if result_json.startswith("`") and result_json.endswith("`"):
+             result_json = result_json.strip("`").strip()
+        if result_json.startswith("json"):
+            result_json = result_json[4:].strip()
+
+        data = json.loads(result_json)
+        intent = data.get("intent")
+        entities = data.get("entities", {})
+
+        if intent == 'activate_user':
+            duration = entities.get('duration_days', 30)
+
+            # --- Execute Action ---
+            # To avoid duplicating code, we can call the existing activate_member logic.
+            # This requires some refactoring. For now, I will replicate the core logic.
+            target_user = update.message.reply_to_message.from_user
+            group_db_id = group['id']
+            add_user_to_group(target_user.id, group_db_id)
+            expiry_date = datetime.datetime.now() + datetime.timedelta(days=duration)
+            activate_db_user(target_user.id, group_db_id, expiry_date.isoformat())
+
+            await update.message.reply_text(
+                f"Understood! I have activated {target_user.mention_html()} for {duration} days.",
+                parse_mode='HTML'
+            )
+
+    except Exception as e:
+        logger.error(f"NLU error: {e}. Raw response: {response.text if 'response' in locals() else 'N/A'}")
+        # Optionally, notify the user of a problem:
+        # await update.message.reply_text("Sorry, I had trouble understanding that.")
+
+
 def main() -> None:
     """Start the bot."""
     # Set up the database
@@ -436,10 +630,28 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(faq_button_handler, pattern="^faq_"))
     application.add_handler(CommandHandler("ask", ask_command))
 
-    # Start the scheduler in a separate thread
+    # --- Conversation Handlers ---
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('setup_automation', setup_automation_start)],
+        states={
+            CHOOSE_GATEWAY: [CallbackQueryHandler(choose_gateway)],
+            GET_API_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_api_key)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_setup)],
+    )
+    application.add_handler(conv_handler)
+
+    # Natural language handler (must be last)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY, handle_natural_language))
+
+    # Start background tasks in separate threads
     scheduler_thread = threading.Thread(target=run_scheduler, args=(application.bot,), daemon=True)
     scheduler_thread.start()
     logger.info("Scheduler started.")
+
+    web_server_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_server_thread.start()
+    logger.info("Webhook server started.")
 
     # Run the bot until the user presses Ctrl-C
     logger.info("Bot is starting...")

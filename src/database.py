@@ -270,5 +270,16 @@ def get_faqs_for_group(group_db_id):
     conn.close()
     return faqs
 
+def update_client_payment_config(client_id, config_json):
+    """Updates the payment gateway configuration for a client."""
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE clients SET payment_gateway_config = ? WHERE id = ?",
+        (config_json, client_id)
+    )
+    conn.commit()
+    conn.close()
+
 if __name__ == '__main__':
     setup_database()
