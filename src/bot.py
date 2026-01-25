@@ -638,6 +638,7 @@ def main() -> None:
             GET_API_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_api_key)],
         },
         fallbacks=[CommandHandler('cancel', cancel_setup)],
+        per_message=False  # Explicitly set per_message to False to suppress warning
     )
     application.add_handler(conv_handler)
 
