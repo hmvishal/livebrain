@@ -39,7 +39,7 @@ import google.generativeai as genai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY":
     genai.configure(api_key=GEMINI_API_KEY)
-    GEMINI_MODEL = genai.GenerativeModel('gemini-pro')
+    GEMINI_MODEL = genai.GenerativeModel('gemini-2.0-flash')
 else:
     GEMINI_MODEL = None
 
